@@ -1,0 +1,10 @@
+{
+    "go.autocompleteUnimportedPackages": true,
+    "go.gocodePackageLookupMode": "go",
+    "go.gotoSymbol.includeImports": true,
+    "go.useCodeSnippetsOnFunctionSuggest": true,
+    "go.inferGopath": true,
+    "go.gopath": "C:/Users/MST/go",
+    "go.useCodeSnippetsOnFunctionSuggestWithoutType": true,
+    "go.goroot": "C:/go",
+}
