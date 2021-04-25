@@ -12,16 +12,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ddliu/go-httpclient"
+	log "github.com/sirupsen/logrus"
 	"io"
-	"io/ioutil"
 	"math"
+	"net/http"
+	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 )
 
 type MyStr1 struct {
@@ -60,10 +60,10 @@ func run(taskId int, taskChan chan int) {
 	}()
 }
 
-func testRequest() {
+/*func testRequest() {
 	http := httpclient.NewHttpClient()
-	res, err := http.PostJson("http://127.0.0.1:8000/invoke",
-		`{"service_name":"demo.ExportProvider.GetExportTplByTplName", "param":{"tplName":"order"}, "client_id":"1"}`)
+	res, err := http.PostJson("http://127.0.0.1:8000/api",
+		`{"service_name":"demo.Hello.Say", "param":{"name":"order"}, "client_id":"1"}`)
 
 	if err != nil {
 		fmt.Println(err)
@@ -79,7 +79,7 @@ func testRequest() {
 	}
 
 	fmt.Println(string(bodyByte))
-}
+}*/
 
 type Handler interface {
 	Do(k, v interface{})
@@ -355,15 +355,323 @@ func max(x, y int) int {
 	return y
 }
 
+type baseUrl struct {
+	Protocol string
+	Location string // ip+port
+	Ip       string
+	Port     string
+	//url.Values is not safe map, add to avoid concurrent map read and map write error
+	paramsLock   sync.RWMutex
+	params       url.Values
+	PrimitiveURL string
+}
+
+// URL is not thread-safe.
+// we fail to define this struct to be immutable object.
+// but, those method which will update the URL, including SetParam, SetParams
+// are only allowed to be invoked in creating URL instance
+// Please keep in mind that this struct is immutable after it has been created and initialized.
+type URL struct {
+	baseUrl
+	Path     string // like  /com.ikurento.dubbo.UserProvider3
+	Username string
+	Password string
+	Methods  []string
+	// special for registry
+	SubURL *URL
+}
+
+// RangeParams will iterate the params
+func (c *URL) RangeParams(f func(key, value string) bool) {
+	c.paramsLock.RLock()
+	defer c.paramsLock.RUnlock()
+	for k, v := range c.params {
+		if !f(k, v[0]) {
+			break
+		}
+	}
+
+	/*if flag {
+		f(key, value)
+	}*/
+}
+
+func (c *URL) RangeParamsUnlock(f func(key, value string) bool) {
+	for k, v := range c.params {
+		if !f(k, v[0]) {
+			break
+		}
+	}
+}
+
+func testArr(key ...interface{}) {
+	fmt.Println(key...)
+}
+
+type Dto struct {
+	Id      int
+	Name    string
+	Content string
+}
+
+func sliceStructPluck(data interface{}, fieldName string, out interface{}) error {
+	t := reflect.TypeOf(data)
+	if t.Kind() != reflect.Slice {
+		return errors.New("data param is not slice")
+	}
+
+	dest := reflect.Indirect(reflect.ValueOf(out))
+	if dest.Kind() != reflect.Slice {
+		return errors.New("out param is not slice")
+	}
+
+	if dest.Len() > 0 {
+		dest.Set(reflect.Zero(dest.Type()))
+	}
+
+	value := reflect.ValueOf(data)
+	for i := 0; i < value.Len(); i++ {
+		dto := value.Index(i).Interface()
+		dtoT := reflect.TypeOf(dto)
+		if dtoT.Kind() != reflect.Struct {
+			return errors.New("data slice is not slice struct type")
+		}
+
+		v := reflect.ValueOf(dto)
+		for j := 0; j < dtoT.NumField(); j++ {
+			field := dtoT.Field(j)
+			fieldVal := v.Field(j)
+			//fmt.Println(value)
+			if field.Name == fieldName {
+				elem := reflect.New(dest.Type().Elem()).Interface()
+				switch d := elem.(type) {
+				case *string:
+					*d = fieldVal.String()
+				case *int:
+					*d = fieldVal.Interface().(int)
+				case *int8:
+					*d = fieldVal.Interface().(int8)
+				case *int16:
+					*d = fieldVal.Interface().(int16)
+				case *int32:
+					*d = fieldVal.Interface().(int32)
+				case *int64:
+					*d = fieldVal.Interface().(int64)
+				case *bool:
+					*d = fieldVal.Interface().(bool)
+				case *float32:
+					*d = fieldVal.Interface().(float32)
+				case *float64:
+					*d = fieldVal.Interface().(float64)
+				default:
+					return errors.New("can not support this out type")
+				}
+
+				dest.Set(reflect.Append(dest, reflect.ValueOf(elem).Elem()))
+			}
+		}
+	}
+
+	return nil
+
+}
+
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+type DemoNoCopy struct {
+	noCopy noCopy
+	T      string
+	t      string
+}
+
+func (demo *DemoNoCopy) GetT() string {
+	return demo.t
+}
+
+var demo DemoNoCopy
+
+func (demo *DemoNoCopy) InitDemoNocopy() {
+	demo.t = "test"
+}
+func GetDemoNoCopy() DemoNoCopy {
+	return demo
+}
+
+type zkConn struct {
+	Addr string
+}
+type zkClient struct {
+	sync.RWMutex
+	Name string
+	exit chan struct{}
+	Conn *zkConn
+}
+
+func newZkClient() *zkClient {
+	return &zkClient{Name: "client1", exit: make(chan struct{}), Conn: &zkConn{
+		Addr: "127.0.0.1",
+	}}
+}
+
+func (c *zkClient) Done() <-chan struct{} {
+	return c.exit
+}
+
+func (c *zkClient) stop() bool {
+	select {
+	case <-c.exit:
+		return true
+	default:
+		close(c.exit)
+	}
+
+	return false
+}
+
 func main() {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		fmt.Println("succeess")
+		time.Sleep(1 * time.Second)
+	WATCH:
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Println("ticker")
+				break WATCH
+			}
+		}
+	}
+	//var testpr interface{}
+	zk := newZkClient()
+	//zk = nil
+	/*testpr = zk
+	fmt.Println(testpr.(*zkClient))
+	fmt.Println("ssss")*/
+	go func() {
+		for {
+			select {
+			case <-zk.exit:
+				fmt.Println("exit get ")
+			}
+
+			if zk.Conn == nil {
+				fmt.Println("zk.Conn is nil")
+			}
+			break
+		}
+	}()
+
+	go func() {
+		close(zk.exit)
+	}()
+
+	time.Sleep(1 * time.Second)
+	params := map[string]string{
+		"test": "test",
+	}
+	//client := http.Client{Timeout: 5}
+	reqParam := url.Values{}
+	for k, v := range params {
+		reqParam.Set(k, v)
+	}
+
+	reqUrl := "http://xhx.xstable.kaikela.cn"
+
+	resp, err := http.Get(reqUrl + "?" + reqParam.Encode())
+	//req, _ := http.NewRequest("GET", reqUrl, nil)
+	//resp, err = client.Do(req)
+	//resp, err := client.PostForm(reqUrl, reqParam)
+	if err != nil {
+		log.Error(err)
+	}
+	defer resp.Body.Close()
+
+	user := DemoNoCopy{T: "test1"}
+	//user3 := DemoNoCopy{}
+	user3 := user
+	user3.T = "test2"
+	fmt.Println(user3)
+	fmt.Println(user)
+
+	/*user.InitUser()
+	user1 := user.GetUser()
+	user1.Where = "where name = "
+	fmt.Println(user1)
+
+	user2 := user.GetUser()
+	fmt.Println(user2)
+	demo := &DemoNoCopy{}
+	demo.InitDemoNocopy()
+	var t1 string
+	t1 = demo.GetT()
+	t1 = "test222"
+	fmt.Println(t1)
+	fmt.Println(demo.GetT())*/
+	return
+	condition := `{"test":"a", "page":1, "pageSize":20}`
+	reg := regexp.MustCompile(`(?i)("page":|"pageCurrent":)\s?\d+`)
+	condition = reg.ReplaceAllString(condition, `${1}`+fmt.Sprintf("%d", 2))
+	reg = regexp.MustCompile(`(?i)("pageSize":|"perPage":)\s?\d+`)
+	condition = reg.ReplaceAllString(condition, `${1}`+fmt.Sprintf("%d", 100))
+	fmt.Println(condition)
+	var a interface{}
+	a = nil
+	fmt.Println(a == nil)
+	return
+	var noCopy *DemoNoCopy
+	noCopy = &DemoNoCopy{}
+	noCopy.T = "test"
+	noCopy1 := noCopy
+	noCopy1.T = "test2"
+	fmt.Println(noCopy)
+
+	var data []Dto
+	data = append(data, Dto{
+		Id:      1,
+		Name:    "test1",
+		Content: "testxxx",
+	}, Dto{
+		Id:      2,
+		Name:    "test2",
+		Content: "test3333",
+	},
+	)
+	var out []string
+	sliceStructPluck(data, "Content", &out)
+	fmt.Println(out)
+	return
+	arr := []interface{}{"1", "2", "3"}
+	testArr(arr...)
+	return
+	var testUrl URL
+	testUrl.params = map[string][]string{
+		"test1": {"11", "va1"},
+		"test2": {"22", "va2"},
+		"test3": {"33", "va3"},
+	}
+
+	testUrl.RangeParams(func(key, value string) bool {
+		fmt.Println(key, value)
+		return true
+	})
+
+	/*testUrl.RangeParamsUnlock(func(key, value string) bool {
+		fmt.Println(key, value)
+		return false
+	})*/
+	return
 
 	//chRe := make(chan int, 100)
 	var wg1 sync.WaitGroup
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 10; i++ {
 		wg1.Add(1)
 		go func() {
 			defer wg1.Done()
-			testRequest()
+			//testRequest()
 		}()
 	}
 

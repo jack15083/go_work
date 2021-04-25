@@ -1,15 +1,16 @@
 package user
 
-import "../person"
+var user User
 
 type User struct {
-	Person person.Male
+	name  string
+	Where string
 }
 
-func NewUser(p person.Male) *User {
-	return &User{Person: p}
+func InitUser() {
+	user.name = "name1"
 }
 
-func (u *User) GetUserInfo(id int64) error {
-	return u.Person.Get(id)
+func GetUser() *User {
+	return &user
 }
